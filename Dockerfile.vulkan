@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+# Vulkan fallback image: upstream llama.cpp (ggml-org) + Mesa RADV, no ROCm.
+# Works on gfx1010 (RDNA1) and on CPUs without AVX.
+#
+# Build:
+#   docker build -t llama-cpp-vulkan:latest -f Dockerfile.vulkan .
+
+# -- STAGE 1: builder ---------------------------------------------------------
+FROM ubuntu:22.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git cmake ninja-build build-essential wget xz-utils ca-certificates \
+    libcurl4-openssl-dev
+
+# Vulkan SDK from the official LunarG tarball (not the apt package): the glslc
+# shipped by Ubuntu 22.04 is too old for the shaders llama.cpp uses
+# ("coopmat undeclared identifier" errors with outdated SDKs).
+ARG VULKAN_VERSION=1.4.321.1
+RUN ARCH=$(uname -m) && \
+    wget -qO /tmp/vulkan-sdk.tar.xz \
+    https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkan-sdk-linux-${ARCH}-${VULKAN_VERSION}.tar.xz && \
+    mkdir -p /opt/vulkan && \
+    tar -xf /tmp/vulkan-sdk.tar.xz -C /tmp --strip-components=1 && \
+    mv /tmp/${ARCH}/* /opt/vulkan/ && \
+    rm -rf /tmp/*
+
+ENV PATH=/opt/vulkan/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/vulkan/lib:$LD_LIBRARY_PATH
+ENV VULKAN_SDK=/opt/vulkan
+
+# Upstream llama.cpp (not the turboquant fork)
+ARG LLAMACPP_REF=master
+WORKDIR /app
+RUN git clone https://github.com/ggml-org/llama.cpp.git . && \
+    git checkout ${LLAMACPP_REF}
+
+# Same no-AVX flags as the ROCm build. GGML_NATIVE=OFF is mandatory here too.
+# The test -x guard makes the build fail if no binary was produced
+# (without it a failed ninja can be silently swallowed by "|| true").
+RUN mkdir build && cd build && \
+    cmake .. \
+        -GNinja \
+        -DGGML_VULKAN=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_NATIVE=OFF \
+        -DGGML_AVX=OFF \
+        -DGGML_AVX2=OFF \
+        -DGGML_FMA=OFF \
+        -DGGML_F16C=OFF \
+        -DGGML_BMI2=OFF \
+        -DCMAKE_CXX_FLAGS="-march=x86-64 -mno-avx -mno-avx2 -mno-fma -mno-bmi2" \
+        -DCMAKE_C_FLAGS="-march=x86-64 -mno-avx -mno-avx2 -mno-fma -mno-bmi2" && \
+    ninja -j$(nproc) && \
+    test -x bin/llama-server && \
+    (strip --strip-unneeded bin/llama-cli bin/llama-server 2>/dev/null || true)
+
+# -- STAGE 2: runtime ---------------------------------------------------------
+FROM ubuntu:22.04 AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+
+# libvulkan1 = Vulkan loader. mesa-vulkan-drivers = RADV, the open-source Mesa
+# driver that supports gfx1010 (RDNA1 / Navi10) natively: no ROCm and no
+# HSA_OVERRIDE_GFX_VERSION needed.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libvulkan1 mesa-vulkan-drivers vulkan-tools libgomp1 libcurl4 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+COPY --from=builder /app/build/bin/ /app/build/bin/
+
+ENTRYPOINT ["/app/build/bin/llama-cli"]
