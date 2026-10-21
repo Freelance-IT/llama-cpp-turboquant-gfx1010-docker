@@ -123,6 +123,7 @@ Todas con `-ngl 99`, salvo el bench del 0.8B (`-ngl -1`, por defecto).
 | Qwen3.5-0.8B Q8_0, solo RX 5700 XT | este repo (`tqp-v0.4.0`, `bcb85fc`) | pp512 **1715.9 ± 88.8** t/s, tg128 **99.9 ± 0.8** t/s |
 | 14B Q4_K_M (8.52 GiB), 3 GPUs, reparto por capas | imagen ROCm 6.3.0 anterior (llama.cpp `781dbc5ac`) | pp512 **59.0** t/s, tg128 **17.6** t/s |
 | 14B Q4_K_M (8.52 GiB), 3 GPUs, reparto por capas | este repo | pp512 **53.7 ± 6.7** t/s, tg128 **18.5 ± 0.7** t/s — terminó limpio, sin cuelgues ni crashes |
+| 14B IQ4_XS, 3 GPUs, `-c 4096 --no-mmap`, `llama-server` | este repo | el modelo cargó en **~86 s** (sin `--no-mmap` nunca terminaba de cargar) |
 | 27B cuantización UD (~16 GB), 3 GPUs | imagen Vulkan (RADV) | prefill ~9.2 t/s, generación ~7 t/s; carga del modelo ~17 min |
 
 Notas: en la misma prueba de 14B con 3 GPUs, la imagen nueva da aprox. −9% en prefill y +5% en generación
@@ -142,7 +143,7 @@ multi-GPU limpia es buena señal — pero un bench no es una prueba de estrés.
 | `local memory (65792) exceeds limit (65536)` | El kernel flash-attn turbo D=512 en gfx1010. Ya está parchado en el Dockerfile. |
 | `no space left on device` al compilar/exportar | El cache de BuildKit y el store de imágenes viven en el filesystem raíz, y cada intento fallido deja capas de varios GB. `docker builder prune --keep-storage 25GB -f` conserva las capas recientes; `docker builder prune -af` borra todo. Mantené **25 GB o más libres**; 40 GB o más para un build desde cero. |
 | `Could not find a version that satisfies the requirement PyYAML (from amdsmi)` | Inofensivo en este build (el pip de la post-instalación de amdsmi no llega a PyPI). El Dockerfile instala `python3-yaml` desde el principio, así pip lo ve como ya satisfecho. |
-| Carga del modelo muy lenta (minutos) | Normalmente es el throughput del disco, no el swap. Prueba: `echo 3 > /proc/sys/vm/drop_caches; dd if=modelo.gguf of=/dev/null bs=16M status=progress`. Si da ~15–30 MB/s, el cuello de botella es el disco → usar SSD/NVMe. Además, cerrá monitores como `radeontop` mientras carga en un CPU de 2 hilos. |
+| La carga tarda muchos minutos, o parece trabada en `load_model: loading model ...`, solo con modelos más grandes que tu RAM libre | **Thrashing del page cache por mmap.** Por defecto llama.cpp hace `mmap` del GGUF; si el archivo no entra en RAM (acá teníamos 7.7 GB) el kernel desaloja y vuelve a leer páginas de un disco lento. **Solución: `--no-mmap`** (en builds nuevos está deprecado a favor de `--load-mode`; mirá `--help`). Medido acá: Qwen3.8-14B IQ4_XS pasó de "nunca terminaba" a **~86 s** de carga en 3 GPUs. Si sigue lento, medí el disco: `echo 3 > /proc/sys/vm/drop_caches; dd if=modelo.gguf of=/dev/null bs=16M status=progress` (~15–30 MB/s → usar SSD/NVMe) y cerrá monitores como `radeontop`. Para ver el avance: `watch -n2 'for c in /sys/class/drm/card*/device/mem_info_vram_used; do echo $c $(( $(cat $c)/1048576 )) MiB; done'` (la VRAM tiene que seguir creciendo). |
 | Falta la UI del server | El build descarga los assets de la UI desde Hugging Face; el log debe decir `UI: archive verified and extracted`. |
 
 ## Alternativa con Vulkan

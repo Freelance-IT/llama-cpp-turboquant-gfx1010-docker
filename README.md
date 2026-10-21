@@ -122,6 +122,7 @@ All runs used `-ngl 99` unless noted (`-ngl -1` default in the 0.8B bench).
 | Qwen3.5-0.8B Q8_0, RX 5700 XT only | this repo (`tqp-v0.4.0`, `bcb85fc`) | pp512 **1715.9 ± 88.8** t/s, tg128 **99.9 ± 0.8** t/s |
 | 14B Q4_K_M (8.52 GiB), 3 GPUs, layer split | earlier ROCm 6.3.0 image (llama.cpp `781dbc5ac`) | pp512 **59.0** t/s, tg128 **17.6** t/s |
 | 14B Q4_K_M (8.52 GiB), 3 GPUs, layer split | this repo | pp512 **53.7 ± 6.7** t/s, tg128 **18.5 ± 0.7** t/s — completed cleanly, no hang/crash |
+| 14B IQ4_XS, 3 GPUs, `-c 4096 --no-mmap`, `llama-server` | this repo | model loaded in **~86 s** (without `--no-mmap` it never finished loading) |
 | 27B UD quant (~16 GB), 3 GPUs | Vulkan image (RADV) | prefill ~9.2 t/s, generation ~7 t/s; model load ~17 min |
 
 Notes: on the same 14B / 3-GPU test the new image is about −9% in prefill and +5% in generation vs. the
@@ -141,7 +142,7 @@ is not a stress test.
 | `local memory (65792) exceeds limit (65536)` | The D=512 turbo flash-attn kernel on gfx1010. Already patched in the Dockerfile. |
 | `no space left on device` during build/export | BuildKit cache + image store live on the root filesystem and every failed attempt leaves multi-GB layers. `docker builder prune --keep-storage 25GB -f` keeps recent layers; `docker builder prune -af` wipes all. Keep **25 GB+ free**; 40 GB+ for a cold build. |
 | `Could not find a version that satisfies the requirement PyYAML (from amdsmi)` | Harmless in this build (amdsmi's post-install pip can't reach PyPI). `python3-yaml` is installed up front in the Dockerfile so pip sees it as already satisfied. |
-| Very slow model load (minutes) | Usually disk throughput, not swap. Test: `echo 3 > /proc/sys/vm/drop_caches; dd if=model.gguf of=/dev/null bs=16M status=progress`. ~15–30 MB/s means the disk is the bottleneck → use SSD/NVMe. Also close monitors like `radeontop` while loading on a 2-thread CPU. |
+| Model load takes many minutes, or seems stuck at `load_model: loading model ...`, only for models bigger than your free RAM | **mmap page-cache thrashing.** By default llama.cpp `mmap`s the GGUF; if the file doesn't fit in RAM (we had 7.7 GB) the kernel keeps evicting and re-reading pages from a slow disk. **Fix: `--no-mmap`** (deprecated in newer builds in favour of `--load-mode`; check `--help`). Measured here: Qwen3.8-14B IQ4_XS went from "never finished" to **~86 s** to load on 3 GPUs. If it is still slow, check disk speed: `echo 3 > /proc/sys/vm/drop_caches; dd if=model.gguf of=/dev/null bs=16M status=progress` (~15–30 MB/s → use SSD/NVMe), and close monitors like `radeontop`. Watch progress with `watch -n2 'for c in /sys/class/drm/card*/device/mem_info_vram_used; do echo $c $(( $(cat $c)/1048576 )) MiB; done'` (VRAM should keep growing). |
 | Server UI missing | The build downloads the web UI assets from Hugging Face; the log should say `UI: archive verified and extracted`. |
 
 ## Vulkan fallback
